@@ -34,11 +34,47 @@ func NewManager() (Manager, error) {
 
 type linuxManager struct{}
 
-func (m *linuxManager) Add(ctx context.Context, destIP, viaInterface string) error {
-	cmd := exec.CommandContext(ctx, "ip", "route", "add", destIP, "dev", viaInterface)
+// getLinuxDefaultRoute returns the default gateway and interface from "ip route show default".
+// Using "via GATEWAY dev IFACE" ensures traffic goes to the gateway; "dev IFACE" alone can
+// treat the host as on-link and break connectivity to remote IPs.
+func getLinuxDefaultRoute(ctx context.Context) (gateway, iface string, err error) {
+	cmd := exec.CommandContext(ctx, "ip", "route", "show", "default")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ip route add %s dev %s: %w: %s", destIP, viaInterface, err, out)
+		return "", "", fmt.Errorf("ip route show default: %w: %s", err, out)
+	}
+	// Line looks like: "default via 192.168.1.1 dev eth0 ..."
+	line := strings.TrimSpace(string(out))
+	fields := strings.Fields(line)
+	for i := 0; i < len(fields)-2; i++ {
+		if fields[i] == "via" && i+1 < len(fields) {
+			gateway = fields[i+1]
+		}
+		if fields[i] == "dev" && i+1 < len(fields) {
+			iface = fields[i+1]
+			break
+		}
+	}
+	if gateway == "" || iface == "" {
+		return "", "", fmt.Errorf("could not parse default route: %q", line)
+	}
+	return gateway, iface, nil
+}
+
+func (m *linuxManager) Add(ctx context.Context, destIP, viaInterface string) error {
+	gateway, defaultIface, err := getLinuxDefaultRoute(ctx)
+	if err != nil {
+		return err
+	}
+	if defaultIface != viaInterface {
+		return fmt.Errorf("default route is via %s, not %s; gateway for %s is not available",
+			defaultIface, viaInterface, viaInterface)
+	}
+	// ip route add DEST via GATEWAY dev IFACE — traffic goes to gateway, which forwards to server
+	cmd := exec.CommandContext(ctx, "ip", "route", "add", destIP, "via", gateway, "dev", viaInterface)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ip route add %s via %s dev %s: %w: %s", destIP, gateway, viaInterface, err, out)
 	}
 	return nil
 }
