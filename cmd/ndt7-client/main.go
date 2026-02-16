@@ -292,19 +292,35 @@ func main() {
 			log.Fatalf("resolve server %q: %v", serverHost, err)
 		}
 		routeCtx = context.Background()
+		var derivedIface string
+		if routeViaNexthop != "" {
+			var err error
+			derivedIface, err = route.InterfaceForNexthop(routeCtx, routeViaNexthop)
+			if err != nil {
+				log.Printf("(could not derive interface for nexthop %s: %v)", routeViaNexthop, err)
+			}
+		}
 		for _, destIP := range destIPs {
 			if err := routeManager.Add(routeCtx, destIP, routeViaInterface, routeViaNexthop); err != nil {
 				log.Fatalf("route add %s: %v (try running as root)", destIP, err)
 			}
 			if routeViaNexthop != "" {
-				log.Printf("Added route: %s via nexthop %s", destIP, routeViaNexthop)
+				if derivedIface != "" {
+					log.Printf("Added route: %s via nexthop %s (interface %s)", destIP, routeViaNexthop, derivedIface)
+				} else {
+					log.Printf("Added route: %s via nexthop %s", destIP, routeViaNexthop)
+				}
 			} else {
 				log.Printf("Added route: %s via %s", destIP, routeViaInterface)
 			}
 			addedRouteIPs = append(addedRouteIPs, destIP)
 		}
 		if routeViaNexthop != "" {
-			log.Printf("Routing traffic to %s via nexthop %s (static route active)", serverHost, routeViaNexthop)
+			if derivedIface != "" {
+				log.Printf("Routing traffic to %s via nexthop %s (interface %s) (static route active)", serverHost, routeViaNexthop, derivedIface)
+			} else {
+				log.Printf("Routing traffic to %s via nexthop %s (static route active)", serverHost, routeViaNexthop)
+			}
 		} else {
 			log.Printf("Routing traffic to %s via interface %s (static route active)", serverHost, routeViaInterface)
 		}

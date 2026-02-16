@@ -172,3 +172,49 @@ func (m *darwinManager) Remove(ctx context.Context, destIP string) error {
 
 // ErrUnsupported is returned when the OS is not supported.
 var ErrUnsupported = errors.New("route manager not supported on this OS")
+
+// InterfaceForNexthop returns the interface the kernel uses to reach the given nexthop (gateway) IP.
+func InterfaceForNexthop(ctx context.Context, nexthop string) (iface string, err error) {
+	switch runtime.GOOS {
+	case "linux":
+		return interfaceForNexthopLinux(ctx, nexthop)
+	case "darwin":
+		return interfaceForNexthopDarwin(ctx, nexthop)
+	default:
+		return "", ErrUnsupported
+	}
+}
+
+// interfaceForNexthopLinux runs "ip route get <nexthop>" and parses "dev IFACE".
+func interfaceForNexthopLinux(ctx context.Context, nexthop string) (string, error) {
+	cmd := exec.CommandContext(ctx, "ip", "route", "get", nexthop)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("ip route get %s: %w: %s", nexthop, err, out)
+	}
+	line := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
+	fields := strings.Fields(line)
+	for i := 0; i < len(fields)-1; i++ {
+		if fields[i] == "dev" && i+1 < len(fields) {
+			return fields[i+1], nil
+		}
+	}
+	return "", fmt.Errorf("could not parse interface from ip route get %s: %q", nexthop, line)
+}
+
+// interfaceForNexthopDarwin runs "route -n get <nexthop>" and parses "interface: IFACE".
+func interfaceForNexthopDarwin(ctx context.Context, nexthop string) (string, error) {
+	cmd := exec.CommandContext(ctx, "route", "-n", "get", nexthop)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("route get %s: %w: %s", nexthop, err, out)
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "interface:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "interface:")), nil
+		}
+	}
+	return "", fmt.Errorf("could not parse interface from route get %s", nexthop)
+}
