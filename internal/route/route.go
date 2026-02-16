@@ -11,11 +11,13 @@ import (
 	"strings"
 )
 
-// Manager adds and removes a static route for a destination IP via an interface.
+// Manager adds and removes a static route for a destination IP via an interface or gateway.
 // Typically requires root (or CAP_NET_ADMIN on Linux).
 type Manager interface {
-	// Add adds a route so that destIP is reached via the given interface.
-	Add(ctx context.Context, destIP, viaInterface string) error
+	// Add adds a route so that destIP is reached via the given interface or nexthop.
+	// If viaNexthop is non-empty, it is used as the gateway (for when the default route
+	// is via another interface). Otherwise the default gateway for viaInterface is used.
+	Add(ctx context.Context, destIP, viaInterface, viaNexthop string) error
 	// Remove removes the route for destIP that was added by Add.
 	Remove(ctx context.Context, destIP string) error
 }
@@ -68,20 +70,30 @@ func getLinuxDefaultRoute(ctx context.Context) (gateway, iface string, err error
 	return parseLinuxDefaultRoute(line)
 }
 
-func (m *linuxManager) Add(ctx context.Context, destIP, viaInterface string) error {
-	gateway, defaultIface, err := getLinuxDefaultRoute(ctx)
-	if err != nil {
-		return err
+func (m *linuxManager) Add(ctx context.Context, destIP, viaInterface, viaNexthop string) error {
+	var gateway string
+	if viaNexthop != "" {
+		gateway = viaNexthop
+	} else {
+		gw, defaultIface, err := getLinuxDefaultRoute(ctx)
+		if err != nil {
+			return err
+		}
+		if defaultIface != viaInterface {
+			return fmt.Errorf("default route is via %s, not %s; use -route-via-nexthop to specify the gateway for %s",
+				defaultIface, viaInterface, viaInterface)
+		}
+		gateway = gw
 	}
-	if defaultIface != viaInterface {
-		return fmt.Errorf("default route is via %s, not %s; gateway for %s is not available",
-			defaultIface, viaInterface, viaInterface)
+	// ip route add DEST via GATEWAY [dev IFACE] — traffic goes to gateway
+	args := []string{"route", "add", destIP, "via", gateway}
+	if viaInterface != "" && viaNexthop == "" {
+		args = append(args, "dev", viaInterface)
 	}
-	// ip route add DEST via GATEWAY dev IFACE — traffic goes to gateway, which forwards to server
-	cmd := exec.CommandContext(ctx, "ip", "route", "add", destIP, "via", gateway, "dev", viaInterface)
+	cmd := exec.CommandContext(ctx, "ip", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ip route add %s via %s dev %s: %w: %s", destIP, gateway, viaInterface, err, out)
+		return fmt.Errorf("ip route add %s via %s: %w: %s", destIP, gateway, err, out)
 	}
 	return nil
 }
@@ -125,16 +137,22 @@ func getDefaultGateway(ctx context.Context) (gateway, iface string, err error) {
 	return parseDarwinDefaultRoute(string(out))
 }
 
-func (m *darwinManager) Add(ctx context.Context, destIP, viaInterface string) error {
-	gateway, defaultIface, err := getDefaultGateway(ctx)
-	if err != nil {
-		return err
+func (m *darwinManager) Add(ctx context.Context, destIP, viaInterface, viaNexthop string) error {
+	var gateway string
+	if viaNexthop != "" {
+		gateway = viaNexthop
+	} else {
+		gw, defaultIface, err := getDefaultGateway(ctx)
+		if err != nil {
+			return err
+		}
+		if defaultIface != viaInterface {
+			return fmt.Errorf("default route is via %s, not %s; use -route-via-nexthop to specify the gateway for %s",
+				defaultIface, viaInterface, viaInterface)
+		}
+		gateway = gw
 	}
-	if defaultIface != viaInterface {
-		return fmt.Errorf("default route is via %s, not %s; gateway for %s is not available",
-			defaultIface, viaInterface, viaInterface)
-	}
-	// route add -host DEST GATEWAY — traffic to DEST goes to GATEWAY (on en0), which forwards to server
+	// route add -host DEST GATEWAY — traffic to DEST goes to GATEWAY, which forwards to server
 	cmd := exec.CommandContext(ctx, "route", "add", "-host", destIP, gateway)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

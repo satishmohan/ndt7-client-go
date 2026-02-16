@@ -172,7 +172,7 @@ func TestLinuxAddRemoveIntegration(t *testing.T) {
 	}
 	t.Logf("default route dev %s", iface)
 
-	if err := mgr.Add(ctx, testDest, iface); err != nil {
+	if err := mgr.Add(ctx, testDest, iface, ""); err != nil {
 		t.Fatalf("Add: %v (need root? run: sudo ROUTE_INTEGRATION=1 go test -v -run TestLinuxAddRemove)", err)
 	}
 	t.Logf("Added route to %s via %s", testDest, iface)

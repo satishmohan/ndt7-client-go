@@ -47,10 +47,11 @@
 // The `-server-index <n>` flag selects the n-th server from the Locate list when
 // not using `-server` (e.g. when using `-route-via-interface` without `-server`).
 //
-// The `-route-via-interface <iface>` flag adds a static route to the chosen server
-// via the given interface, runs the speed test, then removes the route. Requires
-// root (or CAP_NET_ADMIN on Linux). Use with `-server` or `-server-index`. Supported
-// on Linux and macOS.
+// The `-route-via-interface <iface>` flag adds a static route via the default
+// gateway for that interface; use when your default route is already via that interface.
+// The `-route-via-nexthop <gateway>` flag adds a static route via the given gateway IP;
+// use when the default route is via another interface (e.g. traffic via eth1's gateway).
+// Both require root (or CAP_NET_ADMIN on Linux). Supported on Linux and macOS.
 //
 // When using `-server` with a short hostname (no dot), TLS ServerName is set to
 // <server>.measurementlab.net so certificate verification passes against M-Lab certs.
@@ -178,7 +179,8 @@ var (
 
 	flagListServers       = fset.Bool("list-servers", false, "fetch and print nearest ndt7 servers from Locate, then exit")
 	flagServerIndex       = fset.Int("server-index", 0, "when not using -server, index of the server to use from Locate list (use with -list-servers to see indices)")
-	flagRouteViaInterface = fset.String("route-via-interface", "", "add a static route to the chosen server via this interface, run the test, then remove the route (requires root); use with -server or -server-index")
+	flagRouteViaInterface = fset.String("route-via-interface", "", "add a static route via this interface (uses default gateway for that interface); requires root")
+	flagRouteViaNexthop   = fset.String("route-via-nexthop", "", "add a static route via this gateway (nexthop) IP; use when default route is via another interface; requires root")
 )
 
 func init() {
@@ -269,15 +271,16 @@ func main() {
 		log.Fatalf("server selection: %v", err)
 	}
 
-	// -route-via-interface: add static route for each server IP, run test, remove routes.
-	// We route all resolved IPs so that whichever one the client's dialer uses goes via the interface.
+	// -route-via-interface or -route-via-nexthop: add static route for each server IP, run test, remove routes.
 	// Route removal must be done explicitly before os.Exit() because os.Exit() skips defers.
 	var routeManager route.Manager
 	var routeCtx context.Context
 	var addedRouteIPs []string
-	if *flagRouteViaInterface != "" {
+	routeViaInterface := *flagRouteViaInterface
+	routeViaNexthop := *flagRouteViaNexthop
+	if routeViaInterface != "" || routeViaNexthop != "" {
 		if serverHost == "" {
-			log.Fatal("when -route-via-interface is set, -server or -server-index (with Locate) must identify the server")
+			log.Fatal("when using -route-via-interface or -route-via-nexthop, -server or -server-index (with Locate) must identify the server")
 		}
 		var err error
 		routeManager, err = route.NewManager()
@@ -290,13 +293,21 @@ func main() {
 		}
 		routeCtx = context.Background()
 		for _, destIP := range destIPs {
-			if err := routeManager.Add(routeCtx, destIP, *flagRouteViaInterface); err != nil {
+			if err := routeManager.Add(routeCtx, destIP, routeViaInterface, routeViaNexthop); err != nil {
 				log.Fatalf("route add %s: %v (try running as root)", destIP, err)
 			}
-			log.Printf("Added route: %s via %s", destIP, *flagRouteViaInterface)
+			if routeViaNexthop != "" {
+				log.Printf("Added route: %s via nexthop %s", destIP, routeViaNexthop)
+			} else {
+				log.Printf("Added route: %s via %s", destIP, routeViaInterface)
+			}
 			addedRouteIPs = append(addedRouteIPs, destIP)
 		}
-		log.Printf("Routing traffic to %s via interface %s (static route active)", serverHost, *flagRouteViaInterface)
+		if routeViaNexthop != "" {
+			log.Printf("Routing traffic to %s via nexthop %s (static route active)", serverHost, routeViaNexthop)
+		} else {
+			log.Printf("Routing traffic to %s via interface %s (static route active)", serverHost, routeViaInterface)
+		}
 	}
 
 	// If we resolved server from Locate, tell clientFactory to use it (and the access token).
@@ -343,9 +354,9 @@ func clientFactory() *ndt7.Client {
 		c.Server = *flagServer
 	}
 	c.Scheme = flagScheme.Value
-	// When using -route-via-interface, force wss (port 443) so the connection
+	// When using route flags, force wss (port 443) so the connection
 	// uses the standard TLS port; ws (port 80) often times out or is blocked.
-	if *flagRouteViaInterface != "" && c.Scheme == "ws" {
+	if (*flagRouteViaInterface != "" || *flagRouteViaNexthop != "") && c.Scheme == "ws" {
 		c.Scheme = "wss"
 	}
 
@@ -357,9 +368,9 @@ func clientFactory() *ndt7.Client {
 	}
 	c.Dialer.TLSClientConfig = tlsConfig
 
-	// When using -route-via-interface, we only add routes for IPv4. Force the
+	// When using route flags, we only add routes for IPv4. Force the
 	// dialer to use IPv4 so the connection uses the IP we routed.
-	if *flagRouteViaInterface != "" {
+	if *flagRouteViaInterface != "" || *flagRouteViaNexthop != "" {
 		c.Dialer.NetDialContext = dialContextIPv4
 	}
 
@@ -424,7 +435,7 @@ func getServerHost() (host, accessToken string, err error) {
 	if *flagServer != "" {
 		return *flagServer, "", nil
 	}
-	if *flagRouteViaInterface == "" && !*flagListServers {
+	if *flagRouteViaInterface == "" && *flagRouteViaNexthop == "" && !*flagListServers {
 		return "", "", nil
 	}
 	// Need to fetch from Locate to pick by index or list.
