@@ -34,19 +34,15 @@ func NewManager() (Manager, error) {
 
 type linuxManager struct{}
 
-// getLinuxDefaultRoute returns the default gateway and interface from "ip route show default".
-// Using "via GATEWAY dev IFACE" ensures traffic goes to the gateway; "dev IFACE" alone can
-// treat the host as on-link and break connectivity to remote IPs.
-func getLinuxDefaultRoute(ctx context.Context) (gateway, iface string, err error) {
-	cmd := exec.CommandContext(ctx, "ip", "route", "show", "default")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", "", fmt.Errorf("ip route show default: %w: %s", err, out)
+// parseLinuxDefaultRoute parses the first line of "ip route show default" output.
+// Line looks like: "default via 192.168.1.1 dev eth0 ..."
+func parseLinuxDefaultRoute(line string) (gateway, iface string, err error) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", "", fmt.Errorf("empty default route line")
 	}
-	// Line looks like: "default via 192.168.1.1 dev eth0 ..."
-	line := strings.TrimSpace(string(out))
 	fields := strings.Fields(line)
-	for i := 0; i < len(fields)-2; i++ {
+	for i := 0; i < len(fields)-1; i++ {
 		if fields[i] == "via" && i+1 < len(fields) {
 			gateway = fields[i+1]
 		}
@@ -59,6 +55,17 @@ func getLinuxDefaultRoute(ctx context.Context) (gateway, iface string, err error
 		return "", "", fmt.Errorf("could not parse default route: %q", line)
 	}
 	return gateway, iface, nil
+}
+
+// getLinuxDefaultRoute returns the default gateway and interface from "ip route show default".
+func getLinuxDefaultRoute(ctx context.Context) (gateway, iface string, err error) {
+	cmd := exec.CommandContext(ctx, "ip", "route", "show", "default")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("ip route show default: %w: %s", err, out)
+	}
+	line := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
+	return parseLinuxDefaultRoute(line)
 }
 
 func (m *linuxManager) Add(ctx context.Context, destIP, viaInterface string) error {
@@ -90,16 +97,9 @@ func (m *linuxManager) Remove(ctx context.Context, destIP string) error {
 
 type darwinManager struct{}
 
-// getDefaultGateway returns the default gateway IP and interface from "route -n get default".
-// On macOS, "route add -host X -interface en0" treats X as on-link and breaks connectivity.
-// We must use "route add -host X GATEWAY" so traffic goes via the gateway (on en0) to the server.
-func getDefaultGateway(ctx context.Context) (gateway, iface string, err error) {
-	cmd := exec.CommandContext(ctx, "route", "-n", "get", "default")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", "", fmt.Errorf("route get default: %w: %s", err, out)
-	}
-	lines := strings.Split(string(out), "\n")
+// parseDarwinDefaultRoute parses output of "route -n get default" (macOS).
+func parseDarwinDefaultRoute(output string) (gateway, iface string, err error) {
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "gateway:") {
@@ -113,6 +113,16 @@ func getDefaultGateway(ctx context.Context) (gateway, iface string, err error) {
 		return "", "", fmt.Errorf("no gateway in route get default")
 	}
 	return gateway, iface, nil
+}
+
+// getDefaultGateway returns the default gateway IP and interface from "route -n get default".
+func getDefaultGateway(ctx context.Context) (gateway, iface string, err error) {
+	cmd := exec.CommandContext(ctx, "route", "-n", "get", "default")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("route get default: %w: %s", err, out)
+	}
+	return parseDarwinDefaultRoute(string(out))
 }
 
 func (m *darwinManager) Add(ctx context.Context, destIP, viaInterface string) error {
