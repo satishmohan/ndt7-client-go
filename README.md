@@ -32,6 +32,8 @@ git clone https://github.com/m-lab/ndt7-client-go
 From inside the repository, use `go build -v ./cmd/ndt7-client` to
 build the client. Binaries will be placed in `.`.
 
+**Note:** Use `./cmd/ndt7-client` (with the `./` prefix). Without it, Go looks for a standard-library package and fails with "package cmd/ndt7-client is not in std".
+
 If you're into a one-off install, this
 
 ```bash
