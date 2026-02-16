@@ -1,0 +1,110 @@
+// Package route provides OS-specific add/remove of a static host route
+// so that traffic to a given destination goes via a specific interface.
+package route
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os/exec"
+	"runtime"
+	"strings"
+)
+
+// Manager adds and removes a static route for a destination IP via an interface.
+// Typically requires root (or CAP_NET_ADMIN on Linux).
+type Manager interface {
+	// Add adds a route so that destIP is reached via the given interface.
+	Add(ctx context.Context, destIP, viaInterface string) error
+	// Remove removes the route for destIP that was added by Add.
+	Remove(ctx context.Context, destIP string) error
+}
+
+// NewManager returns a Manager for the current OS, or nil and an error if unsupported.
+func NewManager() (Manager, error) {
+	switch runtime.GOOS {
+	case "linux":
+		return &linuxManager{}, nil
+	case "darwin":
+		return &darwinManager{}, nil
+	default:
+		return nil, fmt.Errorf("route manager not implemented for %s", runtime.GOOS)
+	}
+}
+
+type linuxManager struct{}
+
+func (m *linuxManager) Add(ctx context.Context, destIP, viaInterface string) error {
+	cmd := exec.CommandContext(ctx, "ip", "route", "add", destIP, "dev", viaInterface)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ip route add %s dev %s: %w: %s", destIP, viaInterface, err, out)
+	}
+	return nil
+}
+
+func (m *linuxManager) Remove(ctx context.Context, destIP string) error {
+	cmd := exec.CommandContext(ctx, "ip", "route", "del", destIP)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ip route del %s: %w: %s", destIP, err, out)
+	}
+	return nil
+}
+
+type darwinManager struct{}
+
+// getDefaultGateway returns the default gateway IP and interface from "route -n get default".
+// On macOS, "route add -host X -interface en0" treats X as on-link and breaks connectivity.
+// We must use "route add -host X GATEWAY" so traffic goes via the gateway (on en0) to the server.
+func getDefaultGateway(ctx context.Context) (gateway, iface string, err error) {
+	cmd := exec.CommandContext(ctx, "route", "-n", "get", "default")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("route get default: %w: %s", err, out)
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "gateway:") {
+			gateway = strings.TrimSpace(strings.TrimPrefix(line, "gateway:"))
+		}
+		if strings.HasPrefix(line, "interface:") {
+			iface = strings.TrimSpace(strings.TrimPrefix(line, "interface:"))
+		}
+	}
+	if gateway == "" {
+		return "", "", fmt.Errorf("no gateway in route get default")
+	}
+	return gateway, iface, nil
+}
+
+func (m *darwinManager) Add(ctx context.Context, destIP, viaInterface string) error {
+	gateway, defaultIface, err := getDefaultGateway(ctx)
+	if err != nil {
+		return err
+	}
+	if defaultIface != viaInterface {
+		return fmt.Errorf("default route is via %s, not %s; gateway for %s is not available",
+			defaultIface, viaInterface, viaInterface)
+	}
+	// route add -host DEST GATEWAY — traffic to DEST goes to GATEWAY (on en0), which forwards to server
+	cmd := exec.CommandContext(ctx, "route", "add", "-host", destIP, gateway)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("route add -host %s %s: %w: %s", destIP, gateway, err, out)
+	}
+	return nil
+}
+
+func (m *darwinManager) Remove(ctx context.Context, destIP string) error {
+	cmd := exec.CommandContext(ctx, "route", "delete", destIP)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("route delete %s: %w: %s", destIP, err, out)
+	}
+	return nil
+}
+
+// ErrUnsupported is returned when the OS is not supported.
+var ErrUnsupported = errors.New("route manager not supported on this OS")

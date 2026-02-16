@@ -12,6 +12,7 @@ package ndt7
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -95,6 +96,10 @@ type Client struct {
 	// not empty. Takes precedence over ServiceURL and Locate API.
 	Server string
 
+	// AccessToken is an optional token from the Locate API. When set with Server,
+	// it is added to the WebSocket URL query string (required by M-Lab for requests from Locate).
+	AccessToken string
+
 	// ServiceURL is an optional service url, fully specifying the scheme,
 	// resource, and HTTP parameters. Takes precedence over the Locate API.
 	ServiceURL *url.URL
@@ -173,7 +178,10 @@ func (c *Client) doConnect(ctx context.Context, serviceURL string) (*websocket.C
 	headers := http.Header{}
 	headers.Add("Sec-WebSocket-Protocol", params.SecWebSocketProtocol)
 	headers.Add("User-Agent", MakeUserAgent(c.ClientName, c.ClientVersion))
-	conn, _, err := c.connect(c.Dialer, ctx, URL.String(), headers)
+	conn, resp, err := c.connect(c.Dialer, ctx, URL.String(), headers)
+	if err != nil && resp != nil {
+		err = fmt.Errorf("%w: HTTP %s", err, resp.Status)
+	}
 	return conn, err
 }
 
@@ -226,6 +234,9 @@ func (c *Client) start(ctx context.Context, f testFn, p string) (<-chan spec.Mea
 			Scheme: c.Scheme,
 			Host:   c.Server,
 			Path:   p,
+		}
+		if c.AccessToken != "" {
+			customURL.RawQuery = url.Values{"access_token": []string{c.AccessToken}}.Encode()
 		}
 	}
 	// Second, check for the service url.
